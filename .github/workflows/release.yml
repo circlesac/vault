@@ -18,7 +18,7 @@ jobs:
       - name: Calculate version
         id: bump
         run: |
-          VERSION=$(npx --yes @circlesac/oneup version --source git --target cli/package.json --target node/package.json | tail -1)
+          VERSION=$(npx --yes @circlesac/oneup version --source npm --target cli/package.json --target node/package.json | tail -1)
           node -e 'const fs=require("node:fs"); const cli=JSON.parse(fs.readFileSync("cli/package.json")); const sdk=JSON.parse(fs.readFileSync("node/package.json")); cli.dependencies["@circlesac/vault"]=sdk.version; fs.writeFileSync("cli/package.json", JSON.stringify(cli, null, 2)+"\n")'
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
