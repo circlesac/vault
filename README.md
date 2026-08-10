@@ -171,6 +171,15 @@ cvlt item delete DB_PASSWORD --vault github.com/acme/api
 
 **Scope: personal by default, except `vlt://`.** General commands and `op://` references target your personal account unless you select an org with `--org <slug>` (or `CRCL_ORG`). A `vlt://github.com/<owner>/...` read automatically targets `<owner>` when it is an org accessible to the current Circles credential; otherwise it keeps the personal fallback. An explicit org must match the reference owner, and `run`/`inject` resolve mixed owners independently. CI via GitHub OIDC already has its org fixed by `OP_CONNECT_HOST`.
 
+To exercise two accessible owners against a live development Vault without printing either value, provide distinct fixture references and run:
+
+```bash
+CVLT_E2E_PROFILE=dev-profile \
+CVLT_E2E_REF_A=vlt://github.com/example-org-a/example-repo/MIXED_OWNER_PROBE \
+CVLT_E2E_REF_B=vlt://github.com/example-org-b/example-repo/MIXED_OWNER_PROBE \
+npm run test:e2e:mixed-owners
+```
+
 ### Registering repos for CI access (operator-only)
 
 `cvlt vault create <coordinate>` creates the op:// vault that stores the secrets; for a **repo** coordinate it also records the OIDC grant that lets that repo's CI read it (**creating it is the consent**). Grants are org-scoped, so pass `--org <owner>`. Once per repo:

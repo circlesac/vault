@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { defineCommand, runMain } from "citty"
+import pkg from "../package.json"
 import {
   api,
   apiOptional,
@@ -1282,6 +1283,7 @@ export const main = defineCommand({
   meta: {
     name: "cvlt",
     description: "1Password-style secrets CLI for Circles Vault",
+    version: (pkg as { version?: string }).version || "dev",
   },
   args: {
     profile: { type: "string" as const, description: "Circles profile to use (default: shared current profile)" },
