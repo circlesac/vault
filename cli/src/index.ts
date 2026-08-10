@@ -27,6 +27,12 @@ import { writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
 import { promptSecret } from "@circlesac/vault/cli"
 import { startConnectServer } from "./connect-server"
+import {
+  mutationResult,
+  mutationTarget,
+  mutationTargetLine,
+  type MutationTarget,
+} from "./mutation-output"
 
 type Item = {
   id: string
@@ -93,6 +99,24 @@ const formatFlag = {
 
 const vaultFlag = {
   vault: { type: "string" as const, description: "Vault name or ID" },
+}
+
+async function currentMutationTarget(): Promise<MutationTarget> {
+  return mutationTarget(await getConfig())
+}
+
+async function printMutation<T extends object>(
+  value: T,
+  format: string | undefined,
+  lines: string[]
+) {
+  const target = await currentMutationTarget()
+  if (format === "json") {
+    console.log(JSON.stringify(mutationResult(value, target), null, 2))
+    return
+  }
+  for (const line of lines) console.log(line)
+  console.log(mutationTargetLine(target))
 }
 
 // read
@@ -302,17 +326,16 @@ const vaultCreateCommand = defineCommand({
         grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
       }
 
-      if (args.format === "json") {
-        console.log(JSON.stringify({ vault, grant: grant ?? null }, null, 2))
-      } else {
-        console.log(`Vault: ${coordName} (${vault.id})`)
-        console.log(`Write secrets with: cvlt item create --vault ${coordName} --title <NAME> 'value[password]=...'`)
-        if (coord.repo && grant) {
-          console.log(`CI access registered (${grant.role}) — its CI can read vlt://${coordName}#<NAME> and owner globals.`)
-        } else if (coord.repo) {
-          console.log(`(No CI grant created — pass --org ${coord.owner} to register this repo's CI access.)`)
-        }
+      const lines = [
+        `Vault: ${coordName} (${vault.id})`,
+        `Write secrets with: cvlt item create --vault ${coordName} --title <NAME> 'value[password]=...'`,
+      ]
+      if (coord.repo && grant) {
+        lines.push(`CI access registered (${grant.role}) — its CI can read vlt://${coordName}#<NAME> and owner globals.`)
+      } else if (coord.repo) {
+        lines.push(`(No CI grant created — pass --org ${coord.owner} to register this repo's CI access.)`)
       }
+      await printMutation({ vault, grant: grant ?? null }, args.format, lines)
       return
     }
 
@@ -320,12 +343,7 @@ const vaultCreateCommand = defineCommand({
       method: "POST",
       body: { name: args.name, description: args.description || "" },
     })
-    if (args.format === "json") {
-      console.log(JSON.stringify(vault, null, 2))
-    } else {
-      console.log(`ID:   ${vault.id}`)
-      console.log(`Name: ${vault.name}`)
-    }
+    await printMutation(vault, args.format, [`ID:   ${vault.id}`, `Name: ${vault.name}`])
   },
 })
 
@@ -344,12 +362,7 @@ const vaultEditCommand = defineCommand({
     if (args.name) body.name = args.name
     if (args.description) body.description = args.description
     const vault = await api<Vault>(`/v1/vaults/${vaultId}`, { method: "PUT", body })
-    if (args.format === "json") {
-      console.log(JSON.stringify(vault, null, 2))
-    } else {
-      console.log(`ID:   ${vault.id}`)
-      console.log(`Name: ${vault.name}`)
-    }
+    await printMutation(vault, args.format, [`ID:   ${vault.id}`, `Name: ${vault.name}`])
   },
 })
 
@@ -358,6 +371,7 @@ const vaultDeleteCommand = defineCommand({
   meta: { name: "delete", description: "Delete a vault (coordinate name revokes the repo's CI access; secrets remain)" },
   args: {
     vault: { type: "positional" as const, description: "Vault name or ID", required: true },
+    ...formatFlag,
   },
   async run({ args }) {
     const coord = parseVaultCoordinate(args.vault)
@@ -376,13 +390,23 @@ const vaultDeleteCommand = defineCommand({
       for (const g of matching) {
         await api(`/v1/oidc/grants/${g.id}`, { method: "DELETE" })
       }
-      console.log(`Revoked CI access for ${args.vault} (${matching.length} registration${matching.length > 1 ? "s" : ""}).`)
-      console.log("Its secrets remain — remove them with 'cvlt item delete --vault <coordinate>' if needed.")
+      await printMutation(
+        { deleted: true, coordinate: args.vault, registrations: matching.length },
+        args.format,
+        [
+          `Revoked CI access for ${args.vault} (${matching.length} registration${matching.length > 1 ? "s" : ""}).`,
+          "Its secrets remain — remove them with 'cvlt item delete --vault <coordinate>' if needed.",
+        ]
+      )
       return
     }
     const vaultId = await resolveVault(args.vault)
     await api(`/v1/vaults/${vaultId}`, { method: "DELETE" })
-    console.log(`Vault "${args.vault}" deleted.`)
+    await printMutation(
+      { deleted: true, vault: args.vault, vault_id: vaultId },
+      args.format,
+      [`Vault "${args.vault}" deleted.`]
+    )
   },
 })
 
@@ -564,13 +588,11 @@ const itemCreateCommand = defineCommand({
       },
     })
 
-    if (args.format === "json") {
-      console.log(JSON.stringify(item, null, 2))
-    } else {
-      console.log(`ID:    ${item.id}`)
-      console.log(`Title: ${item.title}`)
-      console.log(`Vault: ${item.vault.id}`)
-    }
+    await printMutation(item, args.format, [
+      `ID:    ${item.id}`,
+      `Title: ${item.title}`,
+      `Vault: ${item.vault.id}`,
+    ])
   },
 })
 
@@ -611,13 +633,11 @@ const itemEditCommand = defineCommand({
       },
     })
 
-    if (args.format === "json") {
-      console.log(JSON.stringify(item, null, 2))
-    } else {
-      console.log(`ID:      ${item.id}`)
-      console.log(`Title:   ${item.title}`)
-      console.log(`Version: ${item.version}`)
-    }
+    await printMutation(item, args.format, [
+      `ID:      ${item.id}`,
+      `Title:   ${item.title}`,
+      `Version: ${item.version}`,
+    ])
   },
 })
 
@@ -627,6 +647,7 @@ const itemDeleteCommand = defineCommand({
   args: {
     item: { type: "positional" as const, description: "Item name or ID", required: true },
     ...vaultFlag,
+    ...formatFlag,
   },
   async run({ args }) {
     if (!args.vault) {
@@ -636,7 +657,11 @@ const itemDeleteCommand = defineCommand({
     const vaultId = await resolveVault(args.vault)
     const itemId = await resolveItem(vaultId, args.item)
     await api(`/v1/vaults/${vaultId}/items/${itemId}`, { method: "DELETE" })
-    console.log(`Item "${args.item}" deleted.`)
+    await printMutation(
+      { deleted: true, item: args.item, item_id: itemId, vault_id: vaultId },
+      args.format,
+      [`Item "${args.item}" deleted.`]
+    )
   },
 })
 
@@ -786,11 +811,9 @@ const itemMoveCommand = defineCommand({
       method: "POST",
       body: { vault: destVaultId },
     })
-    if (args.format === "json") {
-      console.log(JSON.stringify(item, null, 2))
-    } else {
-      console.log(`Item "${args.item}" moved to vault "${args["destination-vault"]}".`)
-    }
+    await printMutation(item, args.format, [
+      `Item "${args.item}" moved to vault "${args["destination-vault"]}".`,
+    ])
   },
 })
 
@@ -836,12 +859,11 @@ const documentCreateCommand = defineCommand({
       new Uint8Array(fileContent)
     )
 
-    if (args.format === "json") {
-      console.log(JSON.stringify({ id: item.id, title, vault_id: vaultId }, null, 2))
-    } else {
-      console.log(`ID:    ${item.id}`)
-      console.log(`Title: ${title}`)
-    }
+    await printMutation(
+      { id: item.id, title, vault_id: vaultId },
+      args.format,
+      [`ID:    ${item.id}`, `Title: ${title}`]
+    )
   },
 })
 
@@ -1012,11 +1034,9 @@ const oidcGrantCreateCommand = defineCommand({
     if (args.ref) body.ref = args.ref
     if (args.vault) body.vault_id = await resolveOptionalVault(args.vault)
     const grant = await api<Grant>("/v1/oidc/grants", { method: "POST", body })
-    if (args.format === "json") {
-      console.log(JSON.stringify(grant, null, 2))
-    } else {
-      console.log(`Created grant ${grant.id} for ${grant.repository} (${grant.role})`)
-    }
+    await printMutation(grant, args.format, [
+      `Created grant ${grant.id} for ${grant.repository} (${grant.role})`,
+    ])
   },
 })
 
@@ -1039,11 +1059,7 @@ const oidcGrantEditCommand = defineCommand({
       body.vault_id = args.vault === "null" ? null : await resolveOptionalVault(args.vault)
     }
     const grant = await api<Grant>(`/v1/oidc/grants/${args.id}`, { method: "PUT", body })
-    if (args.format === "json") {
-      console.log(JSON.stringify(grant, null, 2))
-    } else {
-      console.log(`Updated grant ${grant.id}`)
-    }
+    await printMutation(grant, args.format, [`Updated grant ${grant.id}`])
   },
 })
 
@@ -1052,10 +1068,15 @@ const oidcGrantDeleteCommand = defineCommand({
   meta: { name: "delete", description: "Revoke an OIDC grant" },
   args: {
     id: { type: "positional" as const, description: "Grant ID", required: true },
+    ...formatFlag,
   },
   async run({ args }) {
     await api(`/v1/oidc/grants/${args.id}`, { method: "DELETE" })
-    console.log(`Deleted grant ${args.id}`)
+    await printMutation(
+      { deleted: true, grant_id: args.id },
+      args.format,
+      [`Deleted grant ${args.id}`]
+    )
   },
 })
 
@@ -1185,6 +1206,7 @@ const importCommand = defineCommand({
   args: {
     file: { type: "positional" as const, description: ".env file path", required: true },
     ...vaultFlag,
+    ...formatFlag,
     prefix: { type: "string" as const, description: "Prefix prepended to each key (item title)" },
     "skip-existing": {
       type: "boolean" as const,
@@ -1206,6 +1228,7 @@ const importCommand = defineCommand({
     let created = 0
     let overwritten = 0
     let skipped = 0
+    const actions: { action: "create" | "overwrite"; title: string }[] = []
     for (const { key, value } of entries) {
       const title = `${args.prefix ?? ""}${key}`
       // A flat secret is a single field whose id is "value" — that's what the
@@ -1215,7 +1238,7 @@ const importCommand = defineCommand({
         `/v1/vaults/${vaultId}/items?filter=${encodeURIComponent(`title eq "${title}"`)}`
       )
       if (args["dry-run"]) {
-        console.log(`${existing.length ? "overwrite" : "create"}  ${title}`)
+        actions.push({ action: existing.length ? "overwrite" : "create", title })
         continue
       }
       if (existing.length > 0) {
@@ -1236,11 +1259,19 @@ const importCommand = defineCommand({
         created++
       }
     }
-    if (!args["dry-run"]) {
-      console.log(
-        `Imported into ${args.vault}: ${created} created, ${overwritten} overwritten, ${skipped} skipped`
+    if (args["dry-run"]) {
+      await printMutation(
+        { dry_run: true, vault: args.vault, actions },
+        args.format,
+        actions.map(({ action, title }) => `${action}  ${title}`)
       )
+      return
     }
+    await printMutation(
+      { vault: args.vault, created, overwritten, skipped },
+      args.format,
+      [`Imported into ${args.vault}: ${created} created, ${overwritten} overwritten, ${skipped} skipped`]
+    )
   },
 })
 
