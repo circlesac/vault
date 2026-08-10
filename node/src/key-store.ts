@@ -37,7 +37,7 @@ function macWrite(account: string, value: string): boolean {
 }
 
 function linuxRead(account: string): string | null {
-  const result = spawnSync("secret-tool", ["lookup", "service", "circlesac.cvlt", "account", account], {
+  const result = spawnSync("secret-tool", ["lookup", "--", "service", "circlesac.cvlt", "account", account], {
     encoding: "utf8",
   })
   return result.status === 0 && result.stdout.trim() ? result.stdout.trim() : null
@@ -46,7 +46,7 @@ function linuxRead(account: string): string | null {
 function linuxWrite(account: string, value: string): boolean {
   const result = spawnSync(
     "secret-tool",
-    ["store", "--label", "Circles Vault client key", "service", "circlesac.cvlt", "account", account],
+    ["store", "--label", "Circles Vault client key", "--", "service", "circlesac.cvlt", "account", account],
     { input: value, encoding: "utf8" }
   )
   if (process.env.CVLT_TEST_OS_KEYSTORE === "1" && result.status !== 0) {

@@ -57,7 +57,9 @@ describe("device key store", () => {
   if (process.env.CVLT_TEST_OS_KEYSTORE === "1") {
     it(`round-trips through the ${process.platform} OS credential store`, async () => {
       const root = mkdtempSync(join(tmpdir(), "cvlt-key-store-os-"))
-      const origin = `https://os-store-${process.platform}-${Date.now()}.invalid`
+      const origin = process.platform === "linux"
+        ? "https://linux-option-104.invalid"
+        : `https://os-store-${process.platform}-${Date.now()}.invalid`
       const previous = {
         config: process.env.XDG_CONFIG_HOME,
         passphrase: process.env.CVLT_KEYSTORE_PASSPHRASE,
@@ -79,7 +81,7 @@ describe("device key store", () => {
             stdio: "ignore",
           })
         } else if (process.platform === "linux") {
-          spawnSync("secret-tool", ["clear", "service", "circlesac.cvlt", "account", stored.account], {
+          spawnSync("secret-tool", ["clear", "--", "service", "circlesac.cvlt", "account", stored.account], {
             stdio: "ignore",
           })
         }
