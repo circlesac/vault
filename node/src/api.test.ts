@@ -13,6 +13,7 @@ import {
   _resetOidcCache,
   fetchGithubOidcToken,
   getConfig,
+  getConfigForVltOwner,
   hasGithubOidcEnv,
   resolveItem,
   resolveVault,
@@ -276,6 +277,101 @@ describe("getConfig shared Circles credentials", () => {
       token,
       org: null,
     })
+  })
+
+  it("infers an accessible org from a vlt owner and caches the probe", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    fetchSpy = mock(async (url) => {
+      expect(url).toBe("https://vault.circles.ac/circlesac/v1/status")
+      return new Response("[]")
+    })
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    expect(await getConfigForVltOwner("CirclesAC")).toEqual({
+      baseUrl: "https://vault.circles.ac/circlesac",
+      token,
+      org: "circlesac",
+    })
+    expect(await getConfigForVltOwner("circlesac")).toEqual({
+      baseUrl: "https://vault.circles.ac/circlesac",
+      token,
+      org: "circlesac",
+    })
+    expect(fetchSpy.mock.calls).toHaveLength(1)
+  })
+
+  it("resolves mixed vlt owners independently", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    fetchSpy = mock(async (url) => {
+      if (url === "https://vault.circles.ac/circlesac/v1/status") {
+        return new Response("[]")
+      }
+      return new Response(JSON.stringify({ message: "Org not found" }), { status: 403 })
+    })
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    const [organization, personal] = await Promise.all([
+      getConfigForVltOwner("circlesac"),
+      getConfigForVltOwner("personal-owner"),
+    ])
+    expect(organization.org).toBe("circlesac")
+    expect(personal.org).toBeNull()
+    expect(fetchSpy.mock.calls).toHaveLength(2)
+  })
+
+  it("keeps the personal account when the vlt owner is not an accessible org", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    fetchSpy = mock(async () =>
+      new Response(JSON.stringify({ message: "Not a member of this organization" }), { status: 403 })
+    )
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    expect(await getConfigForVltOwner("personal-owner")).toEqual({
+      baseUrl: "https://vault.circles.ac",
+      token,
+      org: null,
+    })
+  })
+
+  it("does not hide other org authorization failures behind personal fallback", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    fetchSpy = mock(async () =>
+      new Response(JSON.stringify({ message: "Access restricted" }), { status: 403 })
+    )
+    globalThis.fetch = fetchSpy as unknown as typeof fetch
+
+    await expect(getConfigForVltOwner("circlesac")).rejects.toMatchObject({
+      status: 403,
+      message: "Access restricted",
+    })
+  })
+
+  it("rejects an explicit org that differs from the vlt owner", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    setOverrides({ org: "melten" })
+
+    await expect(getConfigForVltOwner("circlesac")).rejects.toThrow(
+      "vlt:// owner 'circlesac' does not match selected org 'melten'"
+    )
+    expect(fetchSpy.mock.calls).toHaveLength(0)
+  })
+
+  it("uses a matching explicit org without probing", async () => {
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.CIRCLES_AUTH_TOKEN = token
+    setOverrides({ org: "circlesac" })
+
+    expect(await getConfigForVltOwner("circlesac")).toEqual({
+      baseUrl: "https://vault.circles.ac/circlesac",
+      token,
+      org: "circlesac",
+    })
+    expect(fetchSpy.mock.calls).toHaveLength(0)
   })
 
   it("refreshes an expired profile directly without the crcl executable", async () => {

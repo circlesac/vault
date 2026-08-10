@@ -162,14 +162,14 @@ cvlt item create --vault github.com/acme/api --title DB_PASSWORD 'value[password
 cvlt item edit DB_PASSWORD --vault github.com/acme/api 'value[password]=rotated'
 
 # Read by reference — vlt:// handles the coordinate + inherits (project→owner)
-cvlt read "vlt://github.com/acme/api/DB_PASSWORD"          # cascades to github.com/acme if absent
+cvlt read "vlt://github.com/acme/api/DB_PASSWORD"          # infers accessible org acme; cascades to github.com/acme if absent
 
 # List / delete = op item verbs (coordinate as --vault name)
 cvlt item list --vault github.com/acme/api
 cvlt item delete DB_PASSWORD --vault github.com/acme/api
 ```
 
-**Scope: personal by default.** Commands target your personal account unless you escalate to an org with `--org <slug>` (or `CRCL_ORG`). Personal is always available, non-shared, isolated per user; an org is shared, so targeting it is explicit. CI via GitHub OIDC always resolves to the org.
+**Scope: personal by default, except `vlt://`.** General commands and `op://` references target your personal account unless you select an org with `--org <slug>` (or `CRCL_ORG`). A `vlt://github.com/<owner>/...` read automatically targets `<owner>` when it is an org accessible to the current Circles credential; otherwise it keeps the personal fallback. An explicit org must match the reference owner, and `run`/`inject` resolve mixed owners independently. CI via GitHub OIDC already has its org fixed by `OP_CONNECT_HOST`.
 
 ### Registering repos for CI access (operator-only)
 
