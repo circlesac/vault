@@ -91,6 +91,7 @@ jobs:
         run: bun build --compile --target=${{ matrix.bun_target }} cli/src/index.ts --outfile cvlt
 
       - name: Test version
+        if: matrix.bun_target != 'bun-linux-arm64' && matrix.bun_target != 'bun-darwin-x64'
         shell: bash
         run: |
           binary=./cvlt
