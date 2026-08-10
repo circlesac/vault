@@ -90,6 +90,15 @@ jobs:
       - name: Build
         run: bun build --compile --target=${{ matrix.bun_target }} cli/src/index.ts --outfile cvlt
 
+      - name: Test version
+        shell: bash
+        run: |
+          binary=./cvlt
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            binary=./cvlt.exe
+          fi
+          test "$("$binary" --version)" = "${{ needs.version.outputs.version }}"
+
       - name: Re-sign darwin binary
         if: startsWith(matrix.bun_target, 'bun-darwin')
         run: |
