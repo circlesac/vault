@@ -10,7 +10,7 @@ import {
   getConfig,
   resolveItem,
   resolveVault,
-  secretsApi,
+  secretsApiForOwner,
   setOverrides,
   startRecovery,
   uploadFile,
@@ -70,7 +70,8 @@ async function readSecret(ref: string): Promise<string> {
   }
 
   if (parsed.ref.scheme === "cvlt") {
-    const res = await secretsApi<{ value: string }>(
+    const res = await secretsApiForOwner<{ value: string }>(
+      parsed.ref.owner,
       `/v1/read?ref=${encodeURIComponent(ref)}`
     )
     return res.value
@@ -1284,7 +1285,7 @@ export const main = defineCommand({
   },
   args: {
     profile: { type: "string" as const, description: "Circles profile to use (default: shared current profile)" },
-    org: { type: "string" as const, description: "Target an org account (default: personal). Also honors CRCL_ORG." },
+    org: { type: "string" as const, description: "Target an org account. vlt:// reads infer an accessible owner org; other commands default to personal. Also honors CRCL_ORG." },
   },
   setup({ args }) {
     setOverrides({ profile: args.profile, org: args.org })

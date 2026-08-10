@@ -19,6 +19,7 @@ import {
   startRecovery as startE2eeRecovery,
   uploadEncryptedFile,
   VaultApiError,
+  type VaultConfig,
 } from "./e2ee-client"
 
 const DEFAULT_VAULT_HOST = "https://vault.circles.ac"
@@ -90,10 +91,12 @@ export async function fetchGithubOidcToken(
 // Global overrides set by CLI flags
 let _profileOverride: string | undefined
 let _orgOverride: string | undefined
+const orgAccessProbes = new Map<string, Promise<boolean>>()
 
 export function setOverrides(opts: { profile?: string; org?: string }) {
   _profileOverride = opts.profile
   _orgOverride = opts.org
+  orgAccessProbes.clear()
 }
 
 export async function getConfig() {
@@ -155,6 +158,63 @@ export async function getConfig() {
   return { baseUrl, token: credential.value, org }
 }
 
+async function canAccessOrg(config: VaultConfig, org: string): Promise<boolean> {
+  const key = `${config.baseUrl}\n${org}`
+  let probe = orgAccessProbes.get(key)
+  if (!probe) {
+    probe = (async () => {
+      const res = await fetch(`${config.baseUrl}/${encodeURIComponent(org)}/v1/status`, {
+        headers: { Authorization: `Bearer ${config.token}` },
+      })
+      if (res.ok) return true
+      const text = await res.text()
+      let message = text
+      try {
+        message = JSON.parse(text).message || text
+      } catch {}
+      if (
+        res.status === 403
+        && (message === "Org not found" || message === "Not a member of this organization")
+      ) {
+        return false
+      }
+      throw new VaultApiError(res.status, message)
+    })()
+    orgAccessProbes.set(key, probe)
+  }
+  try {
+    return await probe
+  } catch (error) {
+    orgAccessProbes.delete(key)
+    throw error
+  }
+}
+
+export async function getConfigForVltOwner(owner: string): Promise<VaultConfig> {
+  const normalizedOwner = owner.toLowerCase()
+  const config = await getConfig()
+  if (config.org) {
+    if (config.org.toLowerCase() !== normalizedOwner) {
+      throw new Error(
+        `vlt:// owner '${normalizedOwner}' does not match selected org '${config.org}'`
+      )
+    }
+    return config
+  }
+  const hasFixedConnectScope = !!(
+    process.env.OP_CONNECT_HOST
+    && (process.env.OP_CONNECT_TOKEN || hasGithubOidcEnv())
+  )
+  if (hasFixedConnectScope || !(await canAccessOrg(config, normalizedOwner))) {
+    return config
+  }
+  return {
+    ...config,
+    baseUrl: `${config.baseUrl}/${normalizedOwner}`,
+    org: normalizedOwner,
+  }
+}
+
 /** Flat secrets API (vlt:// surface). Shares the unified scope of getConfig:
  * personal by default, org via --org / CRCL_ORG (lock #22). */
 export async function secretsApi<T = unknown>(
@@ -163,6 +223,18 @@ export async function secretsApi<T = unknown>(
 ): Promise<T> {
   try {
     return await rawSecretsApi<T>(path, opts)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function secretsApiForOwner<T = unknown>(
+  owner: string,
+  path: string,
+  opts: { method?: string; body?: unknown } = {}
+): Promise<T> {
+  try {
+    return await rawSecretsApiWithConfig<T>(await getConfigForVltOwner(owner), path, opts)
   } catch (error) {
     return fail(error)
   }
@@ -183,7 +255,14 @@ export async function rawSecretsApi<T = unknown>(
   path: string,
   opts: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const config = await getConfig()
+  return rawSecretsApiWithConfig<T>(await getConfig(), path, opts)
+}
+
+async function rawSecretsApiWithConfig<T>(
+  config: VaultConfig,
+  path: string,
+  opts: { method?: string; body?: unknown }
+): Promise<T> {
   const translated = await handleSecretsApi<T>(config, path, fetchGithubOidcToken)
   if (translated.handled) return translated.value as T
   return request<T>(`${config.baseUrl}${path}`, config.token, opts)
