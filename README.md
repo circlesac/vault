@@ -32,6 +32,8 @@ npm install -g @circlesac/vlt-cli
 
 `cvlt whoami` shows the resolved host + account (`personal` by default, or `org:<slug>` with `--org`/`CRCL_ORG`).
 
+Use `cvlt --profile prod:user@example.com auth token` when another local client needs the selected profile's short-lived Circles credential. The command refreshes the shared profile when needed and prints only the access token.
+
 ## Common commands
 
 ### Read a secret

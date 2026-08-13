@@ -8,6 +8,7 @@ import {
   completeRecovery,
   doctorE2ee,
   downloadFile,
+  getCirclesToken,
   getConfig,
   resolveItem,
   resolveVault,
@@ -937,6 +938,18 @@ const whoamiCommand = defineCommand({
   },
 })
 
+const authTokenCommand = defineCommand({
+  meta: { name: "token", description: "Print the selected profile's Circles access token" },
+  async run() {
+    console.log(await getCirclesToken())
+  },
+})
+
+const authCommand = defineCommand({
+  meta: { name: "auth", description: "Authentication utilities" },
+  subCommands: { token: authTokenCommand },
+})
+
 // ── OIDC grants ─────────────────────────────────────────────────────────────
 
 type Grant = {
@@ -1293,6 +1306,7 @@ export const main = defineCommand({
     setOverrides({ profile: args.profile, org: args.org })
   },
   subCommands: {
+    auth: authCommand,
     read: readCommand,
     inject: injectCommand,
     run: runCommand,

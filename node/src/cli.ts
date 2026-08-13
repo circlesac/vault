@@ -5,6 +5,7 @@ export {
   doctorE2ee,
   downloadFile,
   fetchGithubOidcToken,
+  getCirclesToken,
   getConfig,
   getConfigForVltOwner,
   rawApi,
