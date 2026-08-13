@@ -99,6 +99,28 @@ export function setOverrides(opts: { profile?: string; org?: string }) {
   orgAccessProbes.clear()
 }
 
+async function resolveCirclesCredential() {
+  const provider = createCredentialProvider({
+    ...(_profileOverride ? { profile: _profileOverride } : {}),
+  })
+  try {
+    const credential = await provider.resolve()
+    const profile = credential.source.type === "profile" ? await provider.getProfile() : undefined
+    return { credential, profile }
+  } catch (error) {
+    if (isCredentialError(error)) {
+      console.error(`Error: ${error.message}`)
+      process.exit(1)
+    }
+    throw error
+  }
+}
+
+/** Return the short-lived Circles credential selected by --profile. */
+export async function getCirclesToken(): Promise<string> {
+  return (await resolveCirclesCredential()).credential.value
+}
+
 export async function getConfig() {
   // 1. OP_CONNECT_* env vars (op CLI compat, manual token)
   if (process.env.OP_CONNECT_HOST && process.env.OP_CONNECT_TOKEN) {
@@ -129,21 +151,7 @@ export async function getConfig() {
   // 3. Shared Circles credential provider. This resolves canonical and legacy
   // env vars, the shared current profile, legacy profiles, and direct refresh
   // without requiring the crcl executable.
-  const provider = createCredentialProvider({
-    ...(_profileOverride ? { profile: _profileOverride } : {}),
-  })
-  let credential
-  let profile
-  try {
-    credential = await provider.resolve()
-    profile = credential.source.type === "profile" ? await provider.getProfile() : undefined
-  } catch (error) {
-    if (isCredentialError(error)) {
-      console.error(`Error: ${error.message}`)
-      process.exit(1)
-    }
-    throw error
-  }
+  const { credential, profile } = await resolveCirclesCredential()
 
   // Scope (lock #22): personal by default. An org is targeted only when
   // explicitly requested via --org or CRCL_ORG. Stored profile orgs do not

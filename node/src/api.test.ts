@@ -12,6 +12,7 @@ import { join } from "node:path"
 import {
   _resetOidcCache,
   fetchGithubOidcToken,
+  getCirclesToken,
   getConfig,
   getConfigForVltOwner,
   hasGithubOidcEnv,
@@ -266,6 +267,7 @@ describe("getConfig shared Circles credentials", () => {
       token: profileToken,
       org: null,
     })
+    expect(await getCirclesToken()).toBe(profileToken)
   })
 
   it("supports a headless canonical environment credential without files", async () => {
