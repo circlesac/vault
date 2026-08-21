@@ -820,9 +820,13 @@ async function coordinateRead(
   const query = new URLSearchParams({ provider, owner })
   if (repository) query.set("repository", repository)
   const rows = await jsonRequest<VaultRow[]>(config, `/v1/coordinates?${query}`)
-  const candidates: { vault_id: string; locator: string }[] = []
+  const candidates: { vault_id: string; locator?: string; item_id?: string }[] = []
   for (const row of rows) {
     candidates.push({ vault_id: row.id, locator: await itemLocator(await vaultKey(config, row, fetchOidcToken), name) })
+    const plain = (await itemRows(config, row.id)).find((item) =>
+      item.content_mode === "plain" && item.title === name
+    )
+    if (plain) candidates.push({ vault_id: row.id, item_id: plain.id })
   }
   const item = await jsonRequest<ItemRow>(config, "/v1/coordinates/read", {
     method: "POST",

@@ -155,6 +155,8 @@ A secret is just an op:// **item** (there's no separate "secret" store or verb).
 
 The item itself is still managed with the op `item`/`vault` verbs — those take the coordinate as a `--vault` **name** (a flag value, not an `op://` reference, so the slashes are fine).
 
+An owner-global Vault may contain a small number of `content_mode: plain` items managed by a private service binding. `cvlt read vlt://…` resolves those items in the same project-before-global order as encrypted items; their public item mutation remains blocked by the Vault service.
+
 ```bash
 # Register the coordinate vault (+ CI grant for a repo coordinate; org-scoped → --org)
 cvlt vault create github.com/acme/api --org acme
