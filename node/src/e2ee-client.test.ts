@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test"
-import { handleApi, resetE2eeCaches } from "./e2ee-client"
+import { handleApi, handleSecretsApi, resetE2eeCaches } from "./e2ee-client"
 import { encodeBase64, encryptJson, itemLocator, randomKey } from "./e2ee-crypto"
 
 const vaultId = "01j00000000000000000000001"
@@ -211,5 +211,96 @@ describe("mixed plain content", () => {
     )
     expect(item.value).toMatchObject({ fields: [{ id: "credential", value: "secret" }] })
     expect(requests.some((url) => url.endsWith("/v1/status"))).toBe(false)
+  })
+})
+
+describe("mixed owner-global coordinate reads", () => {
+  it("resolves a service-managed plain item without changing E2EE inheritance order", async () => {
+    const key = randomKey()
+    const vaultRow = {
+      id: vaultId,
+      attribute_version: 1,
+      content_version: 2,
+      created_at: "2026-08-21T00:00:00Z",
+      updated_at: "2026-08-21T00:00:00Z",
+      items: 2,
+      format_version: 1,
+      overview: await encryptJson(
+        { name: "github.com/circlesac", description: "", type: "USER_CREATED" },
+        key,
+        `cvlt:v1:vault:${vaultId}:overview`
+      ),
+      wrapped_vault_key: null,
+      kms_wrapped_vault_key: {
+        version: 1,
+        algorithm: "RSA-OAEP-3072-SHA256",
+        ciphertext: "wrapped",
+      },
+      coordinate: { provider: "github.com", owner: "circlesac", repository: null },
+    }
+    const plainSummary = {
+      id: itemId,
+      vault_id: vaultId,
+      version: 1,
+      content_mode: "plain",
+      title: "LINUX_RUNNER",
+      category: "runner-routing",
+      created_at: "2026-08-21T00:00:00Z",
+      updated_at: "2026-08-21T00:00:00Z",
+    }
+    let coordinateBody: Record<string, unknown> | undefined
+    globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input)
+      if (url === "https://vault.example/v1/status") {
+        return Response.json({
+          account: "org:circlesac",
+          initialized: true,
+          format_version: 1,
+          client: null,
+          kms: {
+            public_key_pem: null,
+            wif_audience: "kms-audience",
+            key_version: "projects/test/locations/global/keyRings/test/cryptoKeys/test/cryptoKeyVersions/1",
+          },
+        })
+      }
+      if (url === "https://vault.example/v1/coordinates?provider=github.com&owner=circlesac") {
+        return Response.json([vaultRow])
+      }
+      if (url === `https://vault.example/v1/vaults/${vaultId}/items`) return Response.json([plainSummary])
+      if (url === "https://sts.googleapis.com/v1/token") return Response.json({ access_token: "gcp-token" })
+      if (url.startsWith("https://cloudkms.googleapis.com/v1/")) {
+        return Response.json({
+          plaintext: Buffer.from(JSON.stringify({
+            version: 1,
+            vault_id: vaultId,
+            vault_key: encodeBase64(key),
+          })).toString("base64"),
+        })
+      }
+      if (url === "https://vault.example/v1/coordinates/read") {
+        coordinateBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return Response.json({
+          ...plainSummary,
+          fields: [{ id: "value", label: "value", value: JSON.stringify(["self-hosted", "ubuntu-latest"]) }],
+          sections: [],
+        })
+      }
+      return Response.json({ status: 404, message: "unexpected request" }, { status: 404 })
+    }) as unknown as typeof fetch
+
+    const result = await handleSecretsApi<{ value: string }>(
+      { baseUrl: "https://vault.example", token: "caller", org: "circlesac" },
+      "/v1/read?ref=vlt%3A%2F%2Fgithub.com%2Fcirclesac%2FLINUX_RUNNER",
+      async () => "subject-token"
+    )
+
+    expect(result).toEqual({ handled: true, value: { value: JSON.stringify(["self-hosted", "ubuntu-latest"]) } })
+    const candidates = coordinateBody?.candidates as Array<Record<string, unknown>>
+    expect(candidates).toHaveLength(2)
+    expect(candidates[0]).toEqual({ vault_id: vaultId, locator: await itemLocator(key, "LINUX_RUNNER") })
+    expect(candidates[1]).toEqual({ vault_id: vaultId, item_id: itemId })
+    expect(JSON.stringify(coordinateBody)).not.toContain('"title"')
+    expect(JSON.stringify(coordinateBody)).not.toContain("LINUX_RUNNER")
   })
 })
