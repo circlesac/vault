@@ -1,11 +1,12 @@
 import { describe, expect, it } from "bun:test"
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs"
+import { closeSync, existsSync, mkdtempSync, openSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
 import { encodeBase64, type DeviceKey } from "./e2ee-crypto"
 import {
   loadDeviceKey,
+  readLineFromFd,
   readEncryptedKeyFile,
   saveDeviceKey,
   writeEncryptedKeyFile,
@@ -26,6 +27,19 @@ function deviceKey(): DeviceKey {
 }
 
 describe("device key store", () => {
+  it("reads a confirmation line from any console-compatible file descriptor", () => {
+    const root = mkdtempSync(join(tmpdir(), "cvlt-line-reader-"))
+    const path = join(root, "input")
+    writeFileSync(path, "  yes  \r\nignored")
+    const fd = openSync(path, "r")
+    try {
+      expect(readLineFromFd(fd)).toBe("yes")
+    } finally {
+      closeSync(fd)
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
   it("round-trips through the passphrase-encrypted fallback without plaintext", async () => {
     const root = mkdtempSync(join(tmpdir(), "cvlt-key-store-fallback-"))
     const origin = `https://fallback-${Date.now()}.invalid`

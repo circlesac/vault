@@ -58,6 +58,32 @@ export function randomKey(): Uint8Array {
   return crypto.getRandomValues(new Uint8Array(32))
 }
 
+/** SHA-256 of zero bytes — the body digest management proofs use for GET and DELETE. */
+export const EMPTY_BODY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+
+export async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", arrayBuffer(bytes))
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("")
+}
+
+/**
+ * Canonical serialization order for a public JWK: lexicographic property order.
+ * WebCrypto exports RSA public JWKs in exactly this order under Bun, so client
+ * IDs minted by the compiled CLI are unchanged; Node and workerd export the
+ * same properties in a different order and now agree on the same fingerprint.
+ */
+export function canonicalPublicJwk(jwk: JsonWebKey): JsonWebKey {
+  const entries = Object.entries(jwk as Record<string, unknown>)
+    .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0))
+  return Object.fromEntries(entries) as JsonWebKey
+}
+
+/** Canonical SHA-256/base64url fingerprint of a public JWK. This is the client ID. */
+export async function publicKeyFingerprint(jwk: JsonWebKey): Promise<string> {
+  const canonical = encoder.encode(JSON.stringify(canonicalPublicJwk(jwk)))
+  return encodeBase64(new Uint8Array(await crypto.subtle.digest("SHA-256", arrayBuffer(canonical))))
+}
+
 export function generateOpaqueId(): string {
   const chars = "0123456789abcdefghjkmnpqrstvwxyz"
   let timestamp = Date.now()
@@ -160,11 +186,75 @@ export async function generateDeviceKey(): Promise<DeviceKey> {
     true,
     ["encrypt", "decrypt"]
   )
-  const publicKey = await crypto.subtle.exportKey("jwk", pair.publicKey)
+  const publicKey = canonicalPublicJwk(await crypto.subtle.exportKey("jwk", pair.publicKey))
   const privateKey = await crypto.subtle.exportKey("jwk", pair.privateKey)
-  const publicBytes = encoder.encode(JSON.stringify(publicKey))
-  const digest = await crypto.subtle.digest("SHA-256", publicBytes)
-  return { clientId: encodeBase64(new Uint8Array(digest)), publicKey, privateKey }
+  return { clientId: await publicKeyFingerprint(publicKey), publicKey, privateKey }
+}
+
+/**
+ * RSA-OAEP label binding a client-management challenge to one account and one
+ * challenge row, so a proof issued for one challenge cannot open another.
+ */
+export function managementChallengeLabel(account: string, challengeId: string): string {
+  return `cvlt:v1:client-management:${account}:${challengeId}`
+}
+
+/**
+ * Encrypt a management proof to a registered installation's public key. The
+ * service performs this step; the client side has it so the flow is testable
+ * end to end without a live Worker.
+ */
+export async function encryptManagementChallenge(
+  proof: string,
+  publicKeyJwk: JsonWebKey,
+  account: string,
+  challengeId: string
+): Promise<string> {
+  const publicKey = await crypto.subtle.importKey(
+    "jwk",
+    publicKeyJwk,
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    false,
+    ["encrypt"]
+  )
+  const ciphertext = await crypto.subtle.encrypt(
+    { name: "RSA-OAEP", label: arrayBuffer(encoder.encode(managementChallengeLabel(account, challengeId))) },
+    publicKey,
+    arrayBuffer(encoder.encode(proof))
+  )
+  return encodeBase64(new Uint8Array(ciphertext))
+}
+
+/**
+ * Decrypt a management challenge with the device private key and return the
+ * proof exactly as it travels in `X-CVLT-Challenge-Proof`: 43 base64url
+ * characters. A service that encrypts the base64url proof text yields that
+ * text directly; one that encrypts the raw 256-bit proof yields 32 bytes,
+ * which are encoded here. Neither the plaintext nor the private key leaves
+ * this function.
+ */
+export async function decryptManagementChallenge(
+  ciphertext: string,
+  privateKeyJwk: JsonWebKey,
+  account: string,
+  challengeId: string
+): Promise<string> {
+  const privateKey = await crypto.subtle.importKey(
+    "jwk",
+    privateKeyJwk,
+    { name: "RSA-OAEP", hash: "SHA-256" },
+    false,
+    ["decrypt"]
+  )
+  const plaintext = new Uint8Array(await crypto.subtle.decrypt(
+    { name: "RSA-OAEP", label: arrayBuffer(encoder.encode(managementChallengeLabel(account, challengeId))) },
+    privateKey,
+    arrayBuffer(decodeBase64(ciphertext))
+  ))
+  const text = decoder.decode(plaintext)
+  if (/^[A-Za-z0-9_-]{43}$/.test(text)) return text
+  if (plaintext.byteLength !== 32) throw new Error("Client management challenge has an unsupported proof format")
+  return encodeBase64(plaintext)
 }
 
 export async function wrapAccountKeyForDevice(

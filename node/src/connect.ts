@@ -289,6 +289,8 @@ export function createConnectClient(options: ConnectClientOptions): VaultFetcher
     const headers = new Headers(init.headers)
     const authorization = request.headers.get("Authorization")
     if (authorization) headers.set("Authorization", authorization)
+    const clientId = request.headers.get("X-CVLT-Client-ID")
+    if (clientId) headers.set("X-CVLT-Client-ID", clientId)
     if (init.body !== undefined && !headers.has("Content-Type")) headers.set("Content-Type", "application/json")
     return upstream.fetch(new Request(new URL(path, baseUrl), { ...init, headers }))
   }

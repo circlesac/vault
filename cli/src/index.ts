@@ -5,13 +5,17 @@ import pkg from "../package.json"
 import {
   api,
   apiOptional,
+  approveClientEnrollment,
   completeRecovery,
   doctorE2ee,
   downloadFile,
   getCirclesToken,
   getConfig,
+  listClients,
+  requestClientEnrollment,
   resolveItem,
   resolveVault,
+  revokeClient,
   secretsApiForOwner,
   setOverrides,
   startRecovery,
@@ -27,8 +31,9 @@ import { checkForUpdate } from "./lib/update-check.ts"
 import { createReadStream, readFileSync } from "node:fs"
 import { writeFileSync } from "node:fs"
 import { spawnSync } from "node:child_process"
-import { promptSecret } from "@circlesac/vault/cli"
+import { promptLine, promptSecret } from "@circlesac/vault/cli"
 import { startConnectServer } from "./connect-server"
+import { approvalPreview, clientTable, isAffirmative } from "./client-output"
 import {
   mutationResult,
   mutationTarget,
@@ -1160,6 +1165,120 @@ const recoverCommand = defineCommand({
   },
 })
 
+// ── Client installations ────────────────────────────────────────────────────
+// Enrollment lets a second PC join an account without the destructive recovery
+// path. stdout carries only the data surface (the enrollment token, the JSON
+// document, or the result); prompts and diagnostics go to stderr.
+
+function note(line: string) {
+  process.stderr.write(`${line}\n`)
+}
+
+const clientRequestCommand = defineCommand({
+  meta: {
+    name: "request",
+    description: "Print a public enrollment request for this installation",
+  },
+  args: {
+    name: { type: "string" as const, description: "Display name for this installation (max 64 characters)" },
+    ...formatFlag,
+  },
+  async run({ args }) {
+    const result = await requestClientEnrollment(args.name)
+    if (result.status === "already-registered") {
+      note(`This installation is already registered to ${result.account} at ${result.origin}.`)
+      note(`Fingerprint:  ${result.fingerprint}`)
+      note("Nothing to enroll. Run cvlt doctor to check its encryption state.")
+      if (args.format === "json") console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    note(`Vault origin: ${result.origin}`)
+    note(`Account:      ${result.account}`)
+    note(`Platform:     ${result.platform}`)
+    note(`Name:         ${result.name ?? "(none)"}`)
+    note(`Fingerprint:  ${result.fingerprint}`)
+    note(
+      result.created_key
+        ? "Generated this Vault origin's installation key."
+        : "Reused this Vault origin's existing installation key."
+    )
+    note("")
+    note("On an already registered installation, run 'cvlt client approve <request>'")
+    note("and check that it shows the same fingerprint.")
+    note("")
+    if (args.format === "json") {
+      console.log(JSON.stringify(result, null, 2))
+      return
+    }
+    console.log(result.request)
+  },
+})
+
+const clientApproveCommand = defineCommand({
+  meta: {
+    name: "approve",
+    description: "Approve another installation's enrollment request",
+  },
+  args: {
+    request: { type: "positional" as const, description: "Enrollment request from 'cvlt client request'", required: true },
+    ...formatFlag,
+  },
+  async run({ args }) {
+    const result = await approveClientEnrollment(args.request, (details) => {
+      for (const line of approvalPreview(details)) note(line)
+      return isAffirmative(promptLine("Type yes to approve: "))
+    })
+    if (result.status === "declined") {
+      note("Declined. No installation was registered.")
+      if (args.format === "json") console.log(JSON.stringify(result, null, 2))
+      process.exit(1)
+    }
+    await printMutation({ approved: true, ...result.details }, args.format, [
+      `Approved installation ${result.details.client_id}`,
+      `Fingerprint: ${result.details.fingerprint}`,
+      "It can now read this account. Confirm with 'cvlt client list'.",
+    ])
+  },
+})
+
+const clientListCommand = defineCommand({
+  meta: { name: "list", description: "List active installations of this account" },
+  args: { ...formatFlag },
+  async run({ args }) {
+    const clients = await listClients()
+    if (args.format === "json") {
+      console.log(JSON.stringify(clients, null, 2))
+      return
+    }
+    for (const line of clientTable(clients)) console.log(line)
+  },
+})
+
+const clientRevokeCommand = defineCommand({
+  meta: { name: "revoke", description: "Revoke another installation of this account" },
+  args: {
+    client: { type: "positional" as const, description: "Client ID from 'cvlt client list'", required: true },
+    ...formatFlag,
+  },
+  async run({ args }) {
+    const result = await revokeClient(args.client)
+    await printMutation({ revoked: true, ...result }, args.format, [
+      `Revoked installation ${result.client_id}`,
+      "It can no longer decrypt this account. Its Vault content is unchanged.",
+    ])
+  },
+})
+
+const clientCommand = defineCommand({
+  meta: { name: "client", description: "Enroll and manage this account's installations" },
+  subCommands: {
+    request: clientRequestCommand,
+    approve: clientApproveCommand,
+    list: clientListCommand,
+    revoke: clientRevokeCommand,
+  },
+})
+
 const connectCommand = defineCommand({
   meta: { name: "connect", description: "Run a local 1Password Connect-compatible bridge" },
   args: {
@@ -1316,6 +1435,7 @@ export const main = defineCommand({
     document: documentCommand,
     oidc: oidcCommand,
     doctor: doctorCommand,
+    client: clientCommand,
     recover: recoverCommand,
     connect: connectCommand,
     whoami: whoamiCommand,

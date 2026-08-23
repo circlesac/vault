@@ -123,7 +123,7 @@ cvlt document list --vault prod-secrets
 cvlt document get "TLS Cert" --vault prod-secrets -o ./cert.pem
 ```
 
-### Client encryption and recovery
+### Client encryption
 
 Vault content is encrypted locally before upload. The service receives the encrypted representation required by the public client protocol.
 
@@ -131,9 +131,52 @@ Vault content is encrypted locally before upload. The service receives the encry
 cvlt doctor # account encryption, installation key, and GitHub OIDC KMS state
 ```
 
-The first interactive initialization prints a high-entropy recovery code once. Store it outside Vault. The installation private key is saved in macOS Keychain, Windows DPAPI, Linux Secret Service, or a passphrase-encrypted local file when no OS store exists.
+**First use.** The first interactive write initializes account encryption and prints a high-entropy recovery code once. Store it outside Vault. The installation private key is saved in macOS Keychain, Windows DPAPI, Linux Secret Service, or a passphrase-encrypted local file when no OS store exists, and never leaves the machine.
 
-On a new machine, run a fresh `crcl login`, then:
+**One key per Vault origin.** A machine holds a single installation key per Vault deployment, shared by your personal account and every organization you select there. Enrolling the same machine into another account reuses that key, so registrations you already have keep working.
+
+### Using two machines (`cvlt client`)
+
+Enrollment adds a second installation without touching the recovery code and without revoking the first. On the new machine (B):
+
+```bash
+crcl login
+cvlt client request --name "example-workstation"
+```
+
+`client request` prints the enrollment request on stdout and its fingerprint on stderr. The request is public registration material — a versioned, base64url-encoded document holding the Vault origin, the account, the client ID, the public-only JWK, the platform, and the optional name. It contains no private key, no account key, no recovery code, and no access token. Repeating the command with the same account and arguments prints the identical request and never replaces the existing key.
+
+On an already registered machine (A):
+
+```bash
+cvlt client approve <request>
+```
+
+A prints the request's Vault origin, account, display name, platform, and public-key fingerprint, then asks for confirmation. **Check that the fingerprint matches the one B printed** before typing `yes`. Approval only proceeds when the origin and the canonical account match A's own, and A must prove it holds an active installation's private key: the service issues a single-use challenge encrypted to A's registered public key, bound to the account, A's client ID, the HTTP method, the pathname, and the exact request-body bytes.
+
+After approval, B works normally:
+
+```bash
+cvlt doctor
+cvlt read "op://example-vault/example-item/password"
+```
+
+Manage installations explicitly:
+
+```bash
+cvlt client list                 # active installations; the current one is marked
+cvlt client revoke <client-id>   # revoke a lost or retired machine
+```
+
+Revoking an installation leaves your Vault content untouched; the revoked machine gets the "installation is not registered" failure on its next read. An installation cannot revoke itself. A revoked machine can be re-enrolled later with the same stored key — run `cvlt client request` and approve it again; no recovery is needed.
+
+`cvlt client` commands need a signed-in user. GitHub Actions OIDC callers cannot enroll, list, or revoke installations, and their read behavior is unchanged.
+
+### Emergency recovery
+
+`cvlt recover` is the lost-all-installations path. It is destructive: it revokes every previously registered installation and rotates the recovery envelope. Use `cvlt client request` / `approve` for a normal second machine.
+
+On a new machine with no access to any registered installation, run a fresh `crcl login`, then:
 
 ```bash
 cvlt recover start --org circlesac
@@ -183,6 +226,27 @@ CVLT_E2E_REF_A=vlt://github.com/example-org-a/example-repo/MIXED_OWNER_PROBE \
 CVLT_E2E_REF_B=vlt://github.com/example-org-b/example-repo/MIXED_OWNER_PROBE \
 npm run test:e2e:mixed-owners
 ```
+
+### Development enrollment harness
+
+`npm run test:e2e:two-clients` drives the candidate CLI through enroll, list, revoke, re-enroll, and audit readback against a live development deployment. It compares canary values by hash only, never prints one, and removes its test installation and canary item on exit.
+
+It needs **two genuinely independent key stores**. The provided single-host harness is for Linux without a running Secret Service: it uses two encrypted-file stores with distinct `XDG_CONFIG_HOME` values and distinct passphrases. The harness fails when either store has no key file of its own, so a shared OS credential slot cannot masquerade as a second installation. For the rollout gate, the equivalent cross-device sequence can instead use two machines or OS user accounts; two processes under one macOS user do not count because they share one Keychain slot per Vault origin.
+
+Store A must already hold a registered installation; store B must start with none.
+
+```bash
+CVLT_E2E_PROFILE=dev-profile \
+CVLT_E2E_ORG=example-org \
+CVLT_E2E_VAULT=example-vault \
+CVLT_E2E_STORE_A=/tmp/cvlt-store-a \
+CVLT_E2E_STORE_B=/tmp/cvlt-store-b \
+CVLT_E2E_PASSPHRASE_A=example-store-a-passphrase \
+CVLT_E2E_PASSPHRASE_B=example-store-b-passphrase \
+npm run test:e2e:two-clients
+```
+
+`npm run test:e2e` runs the mixed-owner harness and this one; both must pass before a release. The recovery-envelope comparison in the rollout checklist is service-side — no client route exposes the envelope.
 
 ### Registering repos for CI access (operator-only)
 
@@ -279,7 +343,7 @@ used by the CLI. Applications can read Vault values without spawning `cvlt`:
 import { createVaultClient } from "@circlesac/vault"
 
 const vault = createVaultClient()
-const password = await vault.read("op://personal/Modusign/password")
+const password = await vault.read("op://personal/example-service/password")
 ```
 
 The device key remains in macOS Keychain, Linux Secret Service, or Windows
