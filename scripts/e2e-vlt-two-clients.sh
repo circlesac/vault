@@ -123,14 +123,11 @@ MSG
 fi
 
 echo "== A: create the canary item"
-canary_value=$(head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')
-jq -n --arg value "$canary_value" \
-  '{fields:[{id:"value",label:"value",type:"CONCEALED",purpose:"PASSWORD",value:$value}]}' \
-  | a item create --vault "$CVLT_E2E_VAULT" --title "$canary_title" - >/dev/null
+a item create --vault "$CVLT_E2E_VAULT" --title "$canary_title" \
+  --category password --generate-password 32 >/dev/null
 canary_created=1
-unset canary_value
 
-a read "op://$CVLT_E2E_VAULT/$canary_title/value" --out-file "$work_dir/canary-a"
+a read "op://$CVLT_E2E_VAULT/$canary_title/password" --out-file "$work_dir/canary-a"
 hash_a=$(digest "$work_dir/canary-a")
 
 echo "== B: create the enrollment request"
@@ -166,7 +163,7 @@ approve_on_a "$token_b" >/dev/null
 enrolled_client=$client_b
 
 echo "== B: read the canary and compare hashes only"
-b read "op://$CVLT_E2E_VAULT/$canary_title/value" --out-file "$work_dir/canary-b"
+b read "op://$CVLT_E2E_VAULT/$canary_title/password" --out-file "$work_dir/canary-b"
 [[ $(digest "$work_dir/canary-b") == "$hash_a" ]] \
   || { echo "B decrypted a different value than A" >&2; exit 1; }
 
@@ -184,7 +181,11 @@ fi
 
 echo "== audit: CLIENT_ENROLL readback"
 host=$(a whoami | awk '/^Host:/ {print $2}')
-activity_token=$(a auth token)
+if [[ -n ${OP_CONNECT_TOKEN:-} ]]; then
+  activity_token=$OP_CONNECT_TOKEN
+else
+  activity_token=$(a auth token)
+fi
 activity_curl_config="$work_dir/activity-curl.conf"
 printf 'header = "Authorization: Bearer %s"\n' "$activity_token" > "$activity_curl_config"
 chmod 600 "$activity_curl_config"
@@ -206,14 +207,14 @@ echo "== A: revoke B"
 a client revoke "$client_b" >/dev/null
 enrolled_client=""
 
-if b read "op://$CVLT_E2E_VAULT/$canary_title/value" --out-file "$work_dir/canary-b-denied" 2>"$work_dir/denied-after.txt"; then
+if b read "op://$CVLT_E2E_VAULT/$canary_title/password" --out-file "$work_dir/canary-b-denied" 2>"$work_dir/denied-after.txt"; then
   echo "B could still read after revocation" >&2
   exit 1
 fi
 grep -q "not registered" "$work_dir/denied-after.txt" \
   || { echo "Unexpected post-revocation failure: $(cat "$work_dir/denied-after.txt")" >&2; exit 1; }
 
-a read "op://$CVLT_E2E_VAULT/$canary_title/value" --out-file "$work_dir/canary-a-after"
+a read "op://$CVLT_E2E_VAULT/$canary_title/password" --out-file "$work_dir/canary-a-after"
 [[ $(digest "$work_dir/canary-a-after") == "$hash_a" ]] \
   || { echo "A stopped reading its own canary" >&2; exit 1; }
 a client list --format json > "$work_dir/clients-revoked.json"
@@ -241,7 +242,7 @@ b client request --name "cvlt-e2e-second-store" --format json > "$work_dir/reque
   || { echo "Revocation changed B's enrollment request" >&2; exit 1; }
 approve_on_a "$token_b" >/dev/null
 enrolled_client=$client_b
-b read "op://$CVLT_E2E_VAULT/$canary_title/value" --out-file "$work_dir/canary-b-again"
+b read "op://$CVLT_E2E_VAULT/$canary_title/password" --out-file "$work_dir/canary-b-again"
 [[ $(digest "$work_dir/canary-b-again") == "$hash_a" ]] \
   || { echo "Re-enrolled B decrypted a different value" >&2; exit 1; }
 
