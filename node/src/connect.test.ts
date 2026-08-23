@@ -105,7 +105,7 @@ describe("Connect-compatible E2EE client", () => {
   it("keeps v1 vault and item responses plaintext-compatible", async () => {
     const connect = client()
     const vaults = await connect.fetch(new Request("https://local/v1/vaults?filter=title%20eq%20%22Production%22", {
-      headers: { Authorization: "Bearer caller" },
+      headers: { Authorization: "Bearer caller", "X-CVLT-Client-ID": "example-client-id" },
     }))
     expect(vaults.status).toBe(200)
     expect(await vaults.json()).toEqual([expect.objectContaining({ id: vaultId, name: "Production" })])
@@ -125,6 +125,7 @@ describe("Connect-compatible E2EE client", () => {
       fields: [{ id: "password", value: "old-value" }],
     })
     expect(upstreamRequests.every((request) => request.headers.get("Authorization") === "Bearer caller")).toBe(true)
+    expect(upstreamRequests[0]!.headers.get("X-CVLT-Client-ID")).toBe("example-client-id")
   })
 
   it.skipIf(!Bun.which("op"))("supports op read, inject, and run", async () => {

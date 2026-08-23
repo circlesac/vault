@@ -113,6 +113,29 @@ export function promptSecret(prompt: string): string {
   return value
 }
 
+/**
+ * Read one visible line from the controlling terminal. Used for confirmations
+ * that must not be satisfiable by piped stdin, and never for secrets — the
+ * prompt and the echoed answer both stay on the terminal, not on stdout.
+ */
+export function readLineFromFd(fd: number): string {
+  const bytes: number[] = []
+  const buffer = Buffer.alloc(1)
+  while (readSync(fd, buffer, 0, 1, null) === 1) {
+    if (buffer[0] === 10 || buffer[0] === 13) break
+    bytes.push(buffer[0]!)
+  }
+  return Buffer.from(bytes).toString("utf8").trim()
+}
+
+export function promptLine(prompt: string): string {
+  if (!process.stdin.isTTY) {
+    throw new Error("This action needs an explicit confirmation; run it in a terminal")
+  }
+  process.stderr.write(prompt)
+  return readLineFromFd(process.stdin.fd)
+}
+
 async function fallbackKey(passphrase: string, salt: Uint8Array): Promise<CryptoKey> {
   const material = await crypto.subtle.importKey("raw", encoder.encode(passphrase), "PBKDF2", false, ["deriveKey"])
   return crypto.subtle.deriveKey(

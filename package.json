@@ -11,7 +11,9 @@
     "build:sdk": "npm run build --workspace=@circlesac/vault",
     "dev": "bun run cli/src/index.ts",
     "test": "bun test node/src/ cli/src/",
-    "test:e2e:mixed-owners": "bash scripts/e2e-vlt-mixed-owners.sh"
+    "test:e2e": "npm run test:e2e:mixed-owners && npm run test:e2e:two-clients",
+    "test:e2e:mixed-owners": "bash scripts/e2e-vlt-mixed-owners.sh",
+    "test:e2e:two-clients": "bash scripts/e2e-vlt-two-clients.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -220,6 +220,26 @@ describe("getConfig shared Circles credentials", () => {
     }
   })
 
+  it("distinguishes an opaque API key from a manual user JWT", async () => {
+    process.env.OP_CONNECT_HOST = "https://vault.circles.ac/example-org"
+    process.env.OP_CONNECT_TOKEN = "opaque-api-key"
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.circles.ac/example-org",
+      token: "opaque-api-key",
+      org: "example-org",
+      installationIdentity: false,
+    })
+
+    const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
+    process.env.OP_CONNECT_TOKEN = token
+    expect(await getConfig()).toEqual({
+      baseUrl: "https://vault.circles.ac/example-org",
+      token,
+      org: "example-org",
+      installationIdentity: true,
+    })
+  })
+
   it("uses the shared current profile and its development endpoints", async () => {
     const token = fakeJwt(Math.floor(Date.now() / 1000) + 3600)
     writeFileSync(configFile, [

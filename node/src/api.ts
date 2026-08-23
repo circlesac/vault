@@ -11,14 +11,22 @@
 
 import { createCredentialProvider, isCredentialError } from "@circlesac/credentials"
 import {
+  approveClientEnrollment as approveE2eeClientEnrollment,
   completeRecovery as completeE2eeRecovery,
+  createClientEnrollmentRequest as createE2eeClientEnrollmentRequest,
   downloadEncryptedFile,
   e2eeDoctor,
   handleApi,
   handleSecretsApi,
+  listClients as listE2eeClients,
+  revokeClient as revokeE2eeClient,
   startRecovery as startE2eeRecovery,
   uploadEncryptedFile,
   VaultApiError,
+  type ClientSummary,
+  type EnrollmentApprovalDetails,
+  type EnrollmentApprovalResult,
+  type EnrollmentRequestResult,
   type VaultConfig,
 } from "./e2ee-client"
 
@@ -129,7 +137,12 @@ export async function getConfig() {
     // = that org, a bare host = personal (lock #22).
     const org = url.pathname.replace(/^\//, "").replace(/\/$/, "") || null
     const baseUrl = org ? `${url.origin}/${org}` : url.origin
-    return { baseUrl, token: process.env.OP_CONNECT_TOKEN, org }
+    return {
+      baseUrl,
+      token: process.env.OP_CONNECT_TOKEN,
+      org,
+      installationIdentity: process.env.OP_CONNECT_TOKEN.split(".").length === 3,
+    }
   }
 
   // 2. OP_CONNECT_HOST + GitHub Actions OIDC env vars (CI)
@@ -420,6 +433,41 @@ export async function startRecovery() {
 export async function completeRecovery(emailCode: string, recoveryCode: string) {
   try {
     return await completeE2eeRecovery(await getConfig(), emailCode, recoveryCode)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function requestClientEnrollment(name?: string): Promise<EnrollmentRequestResult> {
+  try {
+    return await createE2eeClientEnrollmentRequest(await getConfig(), name)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function approveClientEnrollment(
+  token: string,
+  confirm: (details: EnrollmentApprovalDetails) => boolean | Promise<boolean>
+): Promise<EnrollmentApprovalResult> {
+  try {
+    return await approveE2eeClientEnrollment(await getConfig(), token, confirm)
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function listClients(): Promise<ClientSummary[]> {
+  try {
+    return await listE2eeClients(await getConfig())
+  } catch (error) {
+    return fail(error)
+  }
+}
+
+export async function revokeClient(clientId: string) {
+  try {
+    return await revokeE2eeClient(await getConfig(), clientId)
   } catch (error) {
     return fail(error)
   }

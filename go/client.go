@@ -22,6 +22,7 @@ import (
 type Client struct {
 	baseURL, token string
 	httpClient     *http.Client
+	loadDeviceKey  func(string) (*DeviceKey, error)
 }
 type rsaEnvelope struct {
 	Version               int `json:"version"`
@@ -57,7 +58,7 @@ type itemDetails struct{ Fields []field }
 
 func NewClient(ctx context.Context) (*Client, error) {
 	if host, token := os.Getenv("OP_CONNECT_HOST"), os.Getenv("OP_CONNECT_TOKEN"); host != "" && token != "" {
-		return &Client{strings.TrimRight(host, "/"), token, http.DefaultClient}, nil
+		return &Client{strings.TrimRight(host, "/"), token, http.DefaultClient, LoadDeviceKey}, nil
 	}
 	provider, err := credentials.New()
 	if err != nil {
@@ -67,7 +68,7 @@ func NewClient(ctx context.Context) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Client{"https://vault.circles.ac", credential.Value, http.DefaultClient}, nil
+	return &Client{"https://vault.circles.ac", credential.Value, http.DefaultClient, LoadDeviceKey}, nil
 }
 
 func (client *Client) request(ctx context.Context, method, path string, body any, target any, device *DeviceKey) error {
@@ -170,7 +171,11 @@ func (client *Client) Read(ctx context.Context, reference string) (string, error
 	if index := strings.Index(origin[8:], "/"); index >= 0 {
 		origin = origin[:8+index]
 	}
-	device, err := LoadDeviceKey(origin)
+	loadDeviceKey := client.loadDeviceKey
+	if loadDeviceKey == nil {
+		loadDeviceKey = LoadDeviceKey
+	}
+	device, err := loadDeviceKey(origin)
 	if err != nil {
 		return "", err
 	}
@@ -188,8 +193,11 @@ func (client *Client) Read(ctx context.Context, reference string) (string, error
 	if err != nil {
 		return "", err
 	}
+	// Data routes carry the installation identity too: the service rechecks it
+	// against the account on every request, so a revoked installation stops
+	// reading even while this process still holds the unwrapped account key.
 	var vaults []vaultRow
-	if err := client.request(ctx, "GET", "/v1/vaults", nil, &vaults, nil); err != nil {
+	if err := client.request(ctx, "GET", "/v1/vaults", nil, &vaults, device); err != nil {
 		return "", err
 	}
 	var selected *vaultRow
@@ -222,7 +230,7 @@ func (client *Client) Read(ctx context.Context, reference string) (string, error
 		return "", fmt.Errorf("vault %q not found", ref.Vault)
 	}
 	var item itemRow
-	if err := client.request(ctx, "POST", "/v1/vaults/"+selected.ID+"/items/resolve", map[string]string{"locator": locator(vaultKey, ref.Item)}, &item, nil); err != nil {
+	if err := client.request(ctx, "POST", "/v1/vaults/"+selected.ID+"/items/resolve", map[string]string{"locator": locator(vaultKey, ref.Item)}, &item, device); err != nil {
 		return "", err
 	}
 	if item.ContentMode != "plain" {

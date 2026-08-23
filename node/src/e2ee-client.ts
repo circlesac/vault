@@ -4,17 +4,21 @@ import {
   createRecoveryEnvelope,
   decryptContent,
   decryptJson,
+  decryptManagementChallenge,
   encodeBase64,
   encryptContent,
   encryptJson,
+  EMPTY_BODY_SHA256,
   generateDeviceKey,
   generateOpaqueId,
   itemLocator,
   openRecoveryEnvelope,
   parseEncryptedBytes,
   parseKmsPlaintext,
+  publicKeyFingerprint,
   randomKey,
   serializeEncryptedBytes,
+  sha256Hex,
   unwrapAccountKeyForDevice,
   unwrapKey,
   wrapAccountKeyForDevice,
@@ -26,9 +30,24 @@ import {
   type RecoveryEnvelope,
   type RsaEnvelope,
 } from "./e2ee-crypto"
+import {
+  assertPublicJwk,
+  decodeEnrollmentRequest,
+  encodeEnrollmentRequest,
+  formatFingerprint,
+  normalizeClientName,
+  normalizeVaultOrigin,
+  type EnrollmentRequest,
+} from "./client-enrollment"
 import { filterVaults } from "./connect-filters.js"
 
-export type VaultConfig = { baseUrl: string; token: string; org: string | null }
+export type VaultConfig = {
+  baseUrl: string
+  token: string
+  org: string | null
+  /** False for an opaque API-key credential, which has no installation key. */
+  installationIdentity?: boolean
+}
 export type RequestOptions = { method?: string; body?: unknown }
 export type OidcTokenFetcher = (audience: string) => Promise<string | null>
 
@@ -138,7 +157,15 @@ export class VaultApiError extends Error {
   }
 }
 
+const NOT_REGISTERED_MESSAGE =
+  "This installation is not registered. Run cvlt client request and approve it from a registered installation, or run cvlt recover after a fresh crcl login"
+
+const NOT_INITIALIZED_MESSAGE =
+  "Account encryption is not initialized. Run a first write from the installation that should own this account to bootstrap it; enrollment only adds installations to an initialized account"
+
 const cryptoContexts = new Map<string, CryptoContext>()
+const deviceKeys = new Map<string, Promise<DeviceKey | null>>()
+const initializedAccountDevices = new Map<string, Promise<DeviceKey | null>>()
 const pendingCryptoContexts = new Map<string, Promise<CryptoContext>>()
 const pendingBootstraps = new Map<string, Promise<CryptoContext>>()
 const vaultKeys = new Map<string, Uint8Array>()
@@ -151,6 +178,8 @@ const encoder = new TextEncoder()
 
 export function resetE2eeCaches() {
   cryptoContexts.clear()
+  deviceKeys.clear()
+  initializedAccountDevices.clear()
   pendingCryptoContexts.clear()
   pendingBootstraps.clear()
   vaultKeys.clear()
@@ -161,8 +190,61 @@ export function resetE2eeCaches() {
   itemRowsById.clear()
 }
 
+async function originDeviceKey(origin: string): Promise<DeviceKey | null> {
+  let pending = deviceKeys.get(origin)
+  if (!pending) {
+    pending = loadDeviceKey(origin)
+    deviceKeys.set(origin, pending)
+  }
+  try {
+    const device = await pending
+    if (device === null && deviceKeys.get(origin) === pending) deviceKeys.delete(origin)
+    return device
+  } catch (error) {
+    if (deviceKeys.get(origin) === pending) deviceKeys.delete(origin)
+    throw error
+  }
+}
+
+function rememberDeviceKey(origin: string, device: DeviceKey): void {
+  deviceKeys.set(origin, Promise.resolve(device))
+}
+
 function configCacheKey(config: VaultConfig): string {
   return `${config.baseUrl}\0${config.token}`
+}
+
+/** Omit the origin key only while the selected account is not initialized.
+ * Once initialized, even an unregistered or revoked installation keeps sending
+ * its ID and receives the intended 403 instead of falling through the legacy
+ * no-header compatibility path. Null results are not retained because another
+ * process may initialize the account while this process remains alive. */
+async function initializedAccountDevice(config: VaultConfig): Promise<DeviceKey | null> {
+  const cacheKey = configCacheKey(config)
+  let pending = initializedAccountDevices.get(cacheKey)
+  if (!pending) {
+    pending = (async () => {
+      const device = await originDeviceKey(new URL(config.baseUrl).origin)
+      if (!device) return null
+      const status = await readStatus(config, device)
+      return status.initialized ? device : null
+    })()
+    initializedAccountDevices.set(cacheKey, pending)
+  }
+  try {
+    const device = await pending
+    if (device === null && initializedAccountDevices.get(cacheKey) === pending) {
+      initializedAccountDevices.delete(cacheKey)
+    }
+    return device
+  } catch (error) {
+    if (initializedAccountDevices.get(cacheKey) === pending) initializedAccountDevices.delete(cacheKey)
+    throw error
+  }
+}
+
+function rememberInitializedAccountDevice(config: VaultConfig, device: DeviceKey): void {
+  initializedAccountDevices.set(configCacheKey(config), Promise.resolve(device))
 }
 
 function vaultRowCacheKey(config: VaultConfig, vaultId: string): string {
@@ -217,6 +299,31 @@ function authHeaders(config: VaultConfig, device?: DeviceKey | null): Record<str
   return headers
 }
 
+/** Include the local installation identity on ordinary signed-in-user data
+ * requests. Manual OP_CONNECT_TOKEN credentials may be API keys, whose data
+ * path deliberately has no device key; opening the local key store first would
+ * break existing headless integrations before they reach the server. */
+async function dataAuthHeaders(config: VaultConfig): Promise<Record<string, string>> {
+  if (isOidc() || config.installationIdentity === false) return authHeaders(config)
+  const context = cryptoContexts.get(configCacheKey(config))
+  const cached = context?.device && context.status.client?.id === context.device.clientId
+    ? context.device
+    : null
+  const device = cached ?? await initializedAccountDevice(config)
+  return authHeaders(config, device)
+}
+
+/** The data routes the service gates on the installation identity. A request
+ * path may carry a query string — `/v1/coordinates?provider=…` is how every
+ * `vlt://` read starts — so match the pathname alone, never the whole path. */
+function needsInstallationHeader(path: string): boolean {
+  const pathname = path.split(/[?#]/, 1)[0]!
+  return pathname === "/v1/vaults"
+    || pathname.startsWith("/v1/vaults/")
+    || pathname === "/v1/coordinates"
+    || pathname === "/v1/coordinates/read"
+}
+
 async function errorMessage(response: Response): Promise<string> {
   const text = await response.text()
   try {
@@ -232,7 +339,10 @@ async function jsonRequest<T>(
   options: RequestOptions = {},
   headers: Record<string, string> = {}
 ): Promise<T> {
-  const requestHeaders = { ...authHeaders(config), ...headers }
+  const requestHeaders = {
+    ...(needsInstallationHeader(path) ? await dataAuthHeaders(config) : authHeaders(config)),
+    ...headers,
+  }
   if (options.body !== undefined) requestHeaders["Content-Type"] = "application/json"
   const response = await fetch(`${config.baseUrl}${path}`, {
     method: options.method || "GET",
@@ -255,12 +365,19 @@ async function readStatus(config: VaultConfig, device: DeviceKey | null): Promis
 
 async function bootstrap(config: VaultConfig, device: DeviceKey | null): Promise<CryptoContext> {
   if (isOidc()) throw new Error("GitHub Actions cannot initialize account encryption")
+  if (config.installationIdentity === false) {
+    throw new Error("API keys cannot initialize account encryption")
+  }
+  const origin = new URL(config.baseUrl).origin
   const installation = device ?? await generateDeviceKey()
-  if (!device) await saveDeviceKey(new URL(config.baseUrl).origin, installation)
+  if (!device) {
+    await saveDeviceKey(origin, installation)
+    rememberDeviceKey(origin, installation)
+  }
   const status = await readStatus(config, installation)
   if (status.initialized) {
     if (!status.client) {
-      throw new Error("This installation is not registered. Run cvlt recover after a fresh crcl login")
+      throw new Error(NOT_REGISTERED_MESSAGE)
     }
     const accountKey = await unwrapAccountKeyForDevice(
       status.client.wrapped_account_key,
@@ -305,20 +422,22 @@ async function cryptoContext(config: VaultConfig, allowBootstrap: boolean): Prom
       : context
   }
   const loading = (async () => {
-    const device = isOidc() ? null : await loadDeviceKey(new URL(config.baseUrl).origin)
+    const usesDeviceIdentity = !isOidc() && config.installationIdentity !== false
+    const device = usesDeviceIdentity ? await originDeviceKey(new URL(config.baseUrl).origin) : null
     const status = await readStatus(config, device)
     if (!status.initialized) {
       if (!allowBootstrap) return { status, device, accountKey: null }
       return bootstrapContext(config, device)
     }
-    if (isOidc()) {
+    if (!usesDeviceIdentity) {
       const context = { status, device: null, accountKey: null }
       cryptoContexts.set(cacheKey, context)
       return context
     }
     if (!device || !status.client) {
-      throw new Error("This installation is not registered. Run cvlt recover after a fresh crcl login")
+      throw new Error(NOT_REGISTERED_MESSAGE)
     }
+    rememberInitializedAccountDevice(config, device)
     const accountKey = await unwrapAccountKeyForDevice(
       status.client.wrapped_account_key,
       device.privateKey,
@@ -730,7 +849,7 @@ export async function uploadEncryptedFile(
   const response = await fetch(`${config.baseUrl}/v1/vaults/${vaultId}/items/${itemId}/files`, {
     method: "POST",
     headers: {
-      ...authHeaders(config),
+      ...await dataAuthHeaders(config),
       "Content-Type": "application/octet-stream",
       "X-CVLT-File-ID": fileId,
       "X-CVLT-Metadata": Buffer.from(JSON.stringify(metadata)).toString("base64url"),
@@ -752,7 +871,7 @@ export async function downloadEncryptedFile(
   const row = (await fileRows(config, vaultId, itemId)).find((file) => file.id === fileId)
   if (!row) throw new Error("File not found")
   const response = await fetch(`${config.baseUrl}/v1/vaults/${vaultId}/items/${itemId}/files/${fileId}/content`, {
-    headers: authHeaders(config),
+    headers: await dataAuthHeaders(config),
   })
   if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
   const key = await vaultKey(config, vault, fetchOidcToken)
@@ -863,8 +982,6 @@ export async function handleApi<T>(
   const method = options.method || "GET"
   const parts = url.pathname.split("/").filter(Boolean)
   if (parts[0] !== "v1" || parts[1] !== "vaults") return { handled: false }
-  const resolvingItem = parts[3] === "items" && parts[4] === "resolve" && parts.length === 5 && method === "POST"
-
   if (parts.length === 2) {
     if (method === "POST") {
       return { handled: true, value: await createVault(config, options.body as Record<string, unknown>) as T }
@@ -1040,6 +1157,241 @@ export async function e2eeDoctor(config: VaultConfig): Promise<{
   }
 }
 
+// ── Client installations ────────────────────────────────────────────────────
+//
+// Management operations prove possession of an already registered
+// installation's private key. The service issues a short-lived, single-use
+// RSA-OAEP challenge bound to the account, the current client ID, the HTTP
+// method, the wire pathname, and the SHA-256 of the exact request-body bytes.
+// The private key and the account key never leave this process.
+
+export type ClientSummary = {
+  id: string
+  name: string | null
+  platform: string | null
+  created_at: string
+  is_current: boolean
+}
+
+export type EnrollmentRequestResult = {
+  status: "request" | "already-registered"
+  origin: string
+  account: string
+  client_id: string
+  fingerprint: string
+  platform: string
+  name: string | null
+  /** Present only for status "request". */
+  request: string | null
+  created_key: boolean
+}
+
+export type EnrollmentApprovalDetails = {
+  origin: string
+  account: string
+  client_id: string
+  fingerprint: string
+  platform: string
+  name: string | null
+  current_client_id: string
+}
+
+export type EnrollmentApprovalResult = {
+  status: "approved" | "declined"
+  details: EnrollmentApprovalDetails
+}
+
+type ManagementContext = { device: DeviceKey; status: Status; accountKey: Uint8Array | null }
+
+type Challenge = { id: string; ciphertext: string; expires_at: string }
+
+/** The already-serialized bytes as a standalone buffer, so fetch cannot re-encode them. */
+function requestBody(bytes: Uint8Array): ArrayBuffer {
+  return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+}
+
+async function managementContext(config: VaultConfig): Promise<ManagementContext> {
+  if (isOidc()) throw new Error("GitHub Actions cannot manage client installations")
+  const context = await cryptoContext(config, false)
+  if (!context.status.initialized) throw new Error(NOT_INITIALIZED_MESSAGE)
+  if (!context.device || !context.status.client) throw new Error(NOT_REGISTERED_MESSAGE)
+  return { device: context.device, status: context.status, accountKey: context.accountKey }
+}
+
+/**
+ * Run one management operation under a fresh possession proof.
+ *
+ * The body is serialized exactly once: the digest sent to the challenge route
+ * and the bytes put on the wire are the same buffer, so no re-serialization
+ * can change whitespace, property order, or encoding between the two.
+ */
+async function managementRequest<T>(
+  config: VaultConfig,
+  device: DeviceKey,
+  account: string,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body?: unknown
+): Promise<T> {
+  const bodyBytes = body === undefined ? null : encoder.encode(JSON.stringify(body))
+  const pathname = new URL(`${config.baseUrl}${path}`).pathname
+  const challenge = await jsonRequest<Challenge>(
+    config,
+    "/v1/clients/challenges",
+    {
+      method: "POST",
+      body: {
+        client_id: device.clientId,
+        method,
+        path: pathname,
+        body_sha256: bodyBytes ? await sha256Hex(bodyBytes) : EMPTY_BODY_SHA256,
+      },
+    },
+    { "X-CVLT-Client-ID": device.clientId }
+  )
+  const proof = await decryptManagementChallenge(challenge.ciphertext, device.privateKey, account, challenge.id)
+  const headers: Record<string, string> = {
+    ...authHeaders(config, device),
+    "X-CVLT-Challenge-ID": challenge.id,
+    "X-CVLT-Challenge-Proof": proof,
+  }
+  if (bodyBytes) headers["Content-Type"] = "application/json"
+  const response = await fetch(`${config.baseUrl}${path}`, {
+    method,
+    headers,
+    ...(bodyBytes ? { body: requestBody(bodyBytes) } : {}),
+  })
+  if (!response.ok) throw new VaultApiError(response.status, await errorMessage(response))
+  if (response.status === 204) return undefined as T
+  return response.json() as Promise<T>
+}
+
+/**
+ * Produce the public enrollment request for this installation.
+ *
+ * Load-or-create: the single device key of the selected Vault origin is
+ * reused, never overwritten. A key is generated only when the origin has no
+ * key at all, so enrolling the same machine into a second personal or
+ * organization account keeps every existing registration readable.
+ */
+export async function createClientEnrollmentRequest(
+  config: VaultConfig,
+  name?: string
+): Promise<EnrollmentRequestResult> {
+  if (isOidc()) throw new Error("GitHub Actions cannot enroll a client installation")
+  const origin = normalizeVaultOrigin(config.baseUrl)
+  const displayName = normalizeClientName(name)
+  const platform = process.platform
+  const existing = await originDeviceKey(origin)
+  const status = await readStatus(config, existing)
+  if (!status.initialized) throw new Error(NOT_INITIALIZED_MESSAGE)
+  const device = existing ?? await generateDeviceKey()
+  if (!existing) {
+    await saveDeviceKey(origin, device)
+    rememberDeviceKey(origin, device)
+  }
+  const common = {
+    origin,
+    account: status.account,
+    client_id: device.clientId,
+    fingerprint: formatFingerprint(device.clientId),
+    platform,
+    name: displayName ?? null,
+    created_key: !existing,
+  }
+  // A historical Node SDK stored the runtime's JWK member order in the client
+  // ID. If that exact ID is already registered, it remains safe and usable;
+  // canonical IDs are required only when creating a new enrollment request.
+  if (status.client) return { ...common, status: "already-registered", request: null }
+  if (await publicKeyFingerprint(device.publicKey) !== device.clientId) {
+    throw new Error(
+      "This installation key predates canonical client IDs and cannot create a new enrollment request. Use a fresh installation, or keep this registered installation until coordinated key rotation is available"
+    )
+  }
+  const request: EnrollmentRequest = {
+    version: 1,
+    origin,
+    account: status.account,
+    client_id: device.clientId,
+    public_key: assertPublicJwk(device.publicKey),
+    platform,
+    ...(displayName === undefined ? {} : { name: displayName }),
+  }
+  return { ...common, status: "request", request: encodeEnrollmentRequest(request) }
+}
+
+/**
+ * Approve an enrollment request from an already registered installation.
+ *
+ * The request must decode cleanly, carry a public key whose canonical
+ * fingerprint is its client ID, and match this installation's Vault origin and
+ * canonical account. `confirm` receives those details for display and must
+ * return true before anything is registered.
+ */
+export async function approveClientEnrollment(
+  config: VaultConfig,
+  token: string,
+  confirm: (details: EnrollmentApprovalDetails) => boolean | Promise<boolean>
+): Promise<EnrollmentApprovalResult> {
+  const request = await decodeEnrollmentRequest(token)
+  const { device, status, accountKey } = await managementContext(config)
+  const origin = normalizeVaultOrigin(config.baseUrl)
+  if (request.origin !== origin) {
+    throw new Error(`Enrollment request targets ${request.origin}, but this installation is using ${origin}`)
+  }
+  if (request.account !== status.account) {
+    throw new Error(`Enrollment request is for account ${request.account}, but this installation is using ${status.account}`)
+  }
+  if (request.client_id === device.clientId) {
+    throw new Error("That enrollment request was created by this installation")
+  }
+  if (!accountKey) throw new Error("This installation cannot decrypt the account key")
+  const details: EnrollmentApprovalDetails = {
+    origin,
+    account: status.account,
+    client_id: request.client_id,
+    fingerprint: formatFingerprint(request.client_id),
+    platform: request.platform,
+    name: request.name ?? null,
+    current_client_id: device.clientId,
+  }
+  if (!(await confirm(details))) return { status: "declined", details }
+  await managementRequest(config, device, status.account, "POST", "/v1/clients", {
+    id: request.client_id,
+    public_key: request.public_key,
+    wrapped_account_key: await wrapAccountKeyForDevice(accountKey, request.public_key, status.account),
+    platform: request.platform,
+    ...(request.name === undefined ? {} : { name: request.name }),
+  })
+  return { status: "approved", details }
+}
+
+/** Active installations of the authenticated account. Never returns keys or envelopes. */
+export async function listClients(config: VaultConfig): Promise<ClientSummary[]> {
+  const { device, status } = await managementContext(config)
+  return managementRequest<ClientSummary[]>(config, device, status.account, "GET", "/v1/clients")
+}
+
+export async function revokeClient(
+  config: VaultConfig,
+  clientId: string
+): Promise<{ client_id: string; account: string; origin: string }> {
+  const { device, status } = await managementContext(config)
+  if (clientId === device.clientId) {
+    throw new Error(
+      "Revoking the current installation from itself is not allowed. Revoke it from another registered installation, or run cvlt recover to reset every installation"
+    )
+  }
+  await managementRequest<void>(
+    config,
+    device,
+    status.account,
+    "DELETE",
+    `/v1/clients/${encodeURIComponent(clientId)}`
+  )
+  return { client_id: clientId, account: status.account, origin: normalizeVaultOrigin(config.baseUrl) }
+}
+
 export async function startRecovery(config: VaultConfig): Promise<void> {
   await jsonRequest(config, "/v1/recovery/start", { method: "POST" })
 }
@@ -1056,8 +1408,13 @@ export async function completeRecovery(
     { method: "POST", body: { code: emailCode } }
   )
   const accountKey = await openRecoveryEnvelope(verified.recovery, recoveryCode, status.account)
-  const device = await generateDeviceKey()
-  await saveDeviceKey(new URL(config.baseUrl).origin, device)
+  const origin = new URL(config.baseUrl).origin
+  const existing = await originDeviceKey(origin)
+  const device = existing ?? await generateDeviceKey()
+  if (!existing) {
+    await saveDeviceKey(origin, device)
+    rememberDeviceKey(origin, device)
+  }
   const replacementRecovery = await createRecoveryEnvelope(accountKey, status.account)
   await jsonRequest(config, "/v1/recovery/complete", {
     method: "POST",
