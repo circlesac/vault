@@ -6,8 +6,9 @@
 //
 // vlt:// uses the same slash grammar as op:// (no '#'): NAME is the last
 // segment, the leading github coordinate is the vault. op:// can't name that
-// vault (its name has '/'), which is why vlt:// exists. charset is
-// GitHub-isomorphic (lock #11) — NO escaping; out-of-charset input is rejected.
+// vault (its name has '/'), which is why vlt:// exists. NAME uses uppercase
+// letters, digits, underscores, and hyphens; NO escaping; out-of-charset input
+// is rejected.
 
 export type OpRef = { scheme: "op"; vault: string; item: string; field: string }
 export type CcvltRef = {
@@ -30,7 +31,7 @@ const OP_RE = /^op:\/\/([^/]+)\/([^/]+)\/([^/?]+)/
 const CVLT_PROVIDERS = new Set(["github.com"])
 const OWNER_RE = /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,37}[a-zA-Z0-9])?$/
 const REPO_RE = /^[a-zA-Z0-9_.-]{1,100}$/
-const NAME_RE = /^[A-Z_][A-Z0-9_]{0,199}$/
+const NAME_RE = /^[A-Z_][A-Z0-9_-]{0,199}$/
 
 export function parseRef(ref: string): ParseResult {
   if (ref.startsWith("op://")) {
@@ -67,8 +68,8 @@ export function parseRef(ref: string): ParseResult {
     if (repo !== undefined && !REPO_RE.test(repo)) {
       return { ok: false, message: "Invalid repo (GitHub repo charset)" }
     }
-    if (!NAME_RE.test(name) || name.startsWith("GITHUB_")) {
-      return { ok: false, message: "Invalid NAME ([A-Z0-9_], no digit start, no GITHUB_ prefix)" }
+    if (!NAME_RE.test(name)) {
+      return { ok: false, message: "Invalid NAME (uppercase letters, digits, underscores, and hyphens; no digit start)" }
     }
     return {
       ok: true,

@@ -33,7 +33,7 @@ describe("parseRef: op://", () => {
   })
 })
 
-// ── vlt:// — GitHub-isomorphic charset (lock #11), no escaping ────────────────
+// ── vlt:// — uppercase secret names with optional stage suffix ───────────────
 
 describe("parseRef: vlt://", () => {
   it("parses owner-global refs", () => {
@@ -50,12 +50,20 @@ describe("parseRef: vlt://", () => {
     })
   })
 
+  it("parses GitHub-prefixed names with hyphenated stage suffixes", () => {
+    expect(parseRef("vlt://github.com/circlesac/padawan-v2/GITHUB_APP_ID-DEV")).toEqual({
+      ok: true,
+      ref: { scheme: "cvlt", provider: "github.com", owner: "circlesac", repo: "padawan-v2", name: "GITHUB_APP_ID-DEV" },
+    })
+  })
+
   const bad = [
     ["CJK owner", "vlt://github.com/한글/NAME"],
     ["percent-encoded slash", "vlt://github.com/owner%2Frepo/NAME"],
     ["digit-start NAME", "vlt://github.com/o/1NAME"],
     ["lowercase NAME", "vlt://github.com/o/name"],
-    ["GITHUB_ prefix", "vlt://github.com/o/GITHUB_TOKEN"],
+    ["lowercase after prefix", "vlt://github.com/o/GITHUB_token"],
+    ["invalid punctuation", "vlt://github.com/o/GITHUB_TOKEN!"],
     ["unknown provider", "vlt://gitlab.com/o/NAME"],
     ["no NAME (2 segments)", "vlt://github.com/owner"],
     ["too many segments", "vlt://github.com/o/r/x/NAME"],

@@ -194,7 +194,7 @@ A secret is just an op:// **item** (there's no separate "secret" store or verb).
 
 - `vlt://github.com/<owner>/<repo>/<NAME>` — project; falls back to the owner if absent
 - `vlt://github.com/<owner>/<NAME>` — owner-global
-- NAME charset is GitHub-isomorphic (`[A-Z0-9_]`, no digit start, no `GITHUB_` prefix)
+- NAME uses uppercase letters, digits, underscores, and hyphens (no digit start), so names such as `GITHUB_APP_ID-DEV` are valid.
 
 The item itself is still managed with the op `item`/`vault` verbs — those take the coordinate as a `--vault` **name** (a flag value, not an `op://` reference, so the slashes are fine).
 
